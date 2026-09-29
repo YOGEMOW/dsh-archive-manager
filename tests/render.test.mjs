@@ -1,0 +1,245 @@
+/**
+ * jsdom render test for the archived-chats page. It mounts the real component
+ * against the real `@deepseek-ai/dsh-client-ui-primitives` build, with the Host
+ * route stubbed, and drives the unarchive and delete flows end to end.
+ *
+ * Run through `npm run test:render`, which bundles the harness first.
+ */
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import { JSDOM } from 'jsdom'
+
+/** Rows the stubbed Host route returns. */
+const ARCHIVED = [
+  {
+    sessionId: 'session-a',
+    title: '删除用户安装的Leinator市场',
+    cwd: 'E:\\Git\\repositoris',
+    workspaceId: 'w1',
+    workspaceTitle: 'repositoris',
+    createdAt: 1785778490000,
+    updatedAt: 1785778490000,
+    live: false,
+    bytes: 2048,
+    parentSessionId: null,
+  },
+  {
+    sessionId: 'session-b',
+    title: null,
+    cwd: null,
+    workspaceId: null,
+    workspaceTitle: null,
+    createdAt: 1785686490000,
+    updatedAt: 1785686490000,
+    live: false,
+    bytes: null,
+    parentSessionId: null,
+  },
+  {
+    sessionId: 'session-c',
+    title: '切换ChatGPT界面为中文',
+    cwd: 'E:\\DSH-workspace',
+    workspaceId: 'w2',
+    workspaceTitle: 'DSH-workspace',
+    createdAt: 1785590490000,
+    updatedAt: 1785590490000,
+    live: true,
+    bytes: 4096,
+    parentSessionId: null,
+  },
+]
+
+/** Install a minimal DOM before anything imports react-dom. */
+function setupDom() {
+  const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
+    url: 'http://127.0.0.1:19387/',
+    pretendToBeVisual: true,
+  })
+  const globals = [
+    'window', 'document', 'navigator', 'HTMLElement', 'HTMLInputElement', 'Element', 'Node', 'Event',
+    'MouseEvent', 'KeyboardEvent', 'CustomEvent', 'getComputedStyle', 'requestAnimationFrame',
+    'cancelAnimationFrame', 'MutationObserver', 'DocumentFragment', 'SVGElement', 'ResizeObserver',
+  ]
+  for (const key of globals) {
+    if (dom.window[key] === undefined) continue
+    // Node 22 exposes some of these (navigator) as getter-only globals.
+    Object.defineProperty(globalThis, key, {
+      value: dom.window[key],
+      configurable: true,
+      writable: true,
+    })
+  }
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true
+  return dom
+}
+
+/** Stub `fetch` against a path table and record every call. */
+function stubFetch(routes) {
+  const calls = []
+  globalThis.fetch = async (input, init = {}) => {
+    const path = String(input).replace(/^https?:\/\/[^/]+/, '')
+    calls.push({ path, method: init.method ?? 'GET', body: init.body })
+    const handler = routes[path]
+    const payload = handler === undefined ? { ok: false, error: `no stub for ${path}` } : handler(init)
+    return new Response(JSON.stringify(payload), {
+      status: handler === undefined ? 404 : 200,
+      headers: { 'content-type': 'application/json' },
+    })
+  }
+  return calls
+}
+
+/** Click an element the way React's synthetic events expect. */
+function click(window, element) {
+  element.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }))
+}
+
+/** Find one button by its visible text. */
+function buttonByText(text) {
+  return [...document.querySelectorAll('button')].find((button) => (button.textContent ?? '').includes(text))
+}
+
+test('the archived-chats page renders groups, rows and filters', async () => {
+  setupDom()
+  const calls = stubFetch({
+    '/dsh-archive-manager/archived': (init) => ({ ok: true, sessions: ARCHIVED, total: ARCHIVED.length }),
+  })
+  const harness = await import('./.build/entry.mjs')
+  const t = (key) => harness.zh[key] ?? key
+  const container = document.getElementById('root')
+  const root = harness.createRoot(container)
+  await harness.act(async () => {
+    root.render(harness.React.createElement(harness.ArchiveManagerSection, { t }))
+  })
+
+  assert.equal(calls[0].path, '/dsh-archive-manager/archived')
+  const text = container.textContent
+  assert.match(text, /已归档的聊天/)
+  assert.match(text, /全部删除/)
+  // The search box is identified by its placeholder, not by rendered text.
+  assert.equal(container.querySelector('input[type="search"]').placeholder, '搜索已归档的聊天')
+  // Both project groups plus the trailing "no project" group.
+  assert.match(text, /repositoris/)
+  assert.match(text, /DSH-workspace/)
+  assert.match(text, /无项目/)
+  // Rows: one named title, the untitled fallback, and the live badge.
+  assert.match(text, /删除用户安装的Leinator市场/)
+  assert.match(text, /未命名会话/)
+  assert.match(text, /运行中/)
+  // Group heading counts.
+  assert.match(text, /1 个聊天/)
+  // Byte footprint is rendered for measurable sessions.
+  assert.match(text, /2\.0 KB/)
+
+  // The search box narrows the list without another Host round-trip.
+  const input = container.querySelector('input[type="search"]')
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+  await harness.act(async () => {
+    setter.call(input, 'chatgpt')
+    input.dispatchEvent(new window.Event('input', { bubbles: true }))
+  })
+  assert.doesNotMatch(container.textContent, /删除用户安装的Leinator市场/)
+  assert.match(container.textContent, /切换ChatGPT界面为中文/)
+
+  await harness.act(async () => { root.unmount() })
+})
+
+test('unarchive and permanent delete call the Host routes', async () => {
+  setupDom()
+  const calls = stubFetch({
+    '/dsh-archive-manager/archived': () => ({ ok: true, sessions: ARCHIVED, total: ARCHIVED.length }),
+    '/dsh-archive-manager/unarchive': () => ({ ok: true, restored: ['session-a'] }),
+    '/dsh-archive-manager/delete': () => ({
+      ok: true,
+      outcomes: [{ sessionId: 'session-a', status: 'deleted' }],
+      deleted: 1,
+      remaining: 2,
+    }),
+  })
+  const harness = await import('./.build/entry.mjs')
+  const t = (key) => harness.zh[key] ?? key
+  const container = document.getElementById('root')
+  const root = harness.createRoot(container)
+  await harness.act(async () => {
+    root.render(harness.React.createElement(harness.ArchiveManagerSection, { t }))
+  })
+
+  // Unarchive the first row.
+  const unarchive = [...container.querySelectorAll('button')].find((button) => (button.textContent ?? '') === '取消归档')
+  assert.ok(unarchive, 'expected an unarchive button')
+  await harness.act(async () => {
+    click(window, unarchive)
+  })
+  const unarchiveCall = calls.find((call) => call.path === '/dsh-archive-manager/unarchive')
+  assert.ok(unarchiveCall, 'expected an unarchive request')
+  assert.deepEqual(JSON.parse(unarchiveCall.body), { sessionIds: ['session-a'] })
+
+  // Delete the first row: the confirmation dialog gates the request until the
+  // acknowledgement checkbox is ticked.
+  const trash = container.querySelector('button[aria-label^="删除 "]')
+  assert.ok(trash, 'expected a per-row delete button')
+  await harness.act(async () => {
+    click(window, trash)
+  })
+  assert.match(document.body.textContent, /删除 1 个已归档会话？/)
+  assert.equal(calls.some((call) => call.path === '/dsh-archive-manager/delete'), false, 'delete must wait for confirmation')
+
+  const checkbox = document.body.querySelector('input[type="checkbox"]')
+  assert.ok(checkbox, 'expected the acknowledgement checkbox')
+  // React maps a checkbox's onChange to the native click event.
+  await harness.act(async () => {
+    click(window, checkbox)
+  })
+  await harness.act(async () => {
+    const confirm = buttonByText('永久删除')
+    assert.ok(confirm, 'expected the confirm button')
+    click(window, confirm)
+  })
+  const deleteCall = calls.find((call) => call.path === '/dsh-archive-manager/delete')
+  assert.ok(deleteCall, 'expected a delete request after confirmation')
+  assert.deepEqual(JSON.parse(deleteCall.body), { sessionIds: ['session-a'] })
+
+  await harness.act(async () => { root.unmount() })
+})
+
+test('delete-all targets every archived session', async () => {
+  setupDom()
+  const calls = stubFetch({
+    '/dsh-archive-manager/archived': () => ({ ok: true, sessions: ARCHIVED, total: ARCHIVED.length }),
+    '/dsh-archive-manager/delete': () => ({
+      ok: true,
+      outcomes: ARCHIVED.map((row) => ({ sessionId: row.sessionId, status: 'deleted' })),
+      deleted: ARCHIVED.length,
+      remaining: 0,
+    }),
+  })
+  const harness = await import('./.build/entry.mjs')
+  const t = (key) => harness.zh[key] ?? key
+  const container = document.getElementById('root')
+  const root = harness.createRoot(container)
+  await harness.act(async () => {
+    root.render(harness.React.createElement(harness.ArchiveManagerSection, { t }))
+  })
+
+  const deleteAll = buttonByText('全部删除')
+  assert.ok(deleteAll, 'expected the delete-all button')
+  await harness.act(async () => {
+    click(window, deleteAll)
+  })
+  assert.match(document.body.textContent, /删除全部 3 个已归档会话？/)
+  const checkbox = document.body.querySelector('input[type="checkbox"]')
+  assert.ok(checkbox, 'expected the acknowledgement checkbox')
+  await harness.act(async () => {
+    click(window, checkbox)
+  })
+  await harness.act(async () => {
+    click(window, buttonByText('永久删除'))
+  })
+  const deleteCall = calls.find((call) => call.path === '/dsh-archive-manager/delete')
+  assert.ok(deleteCall, 'expected a delete-all request after confirmation')
+  // Delete-all targets exactly the sessions the Host listed, in Host order.
+  assert.deepEqual(JSON.parse(deleteCall.body), {
+    sessionIds: ['session-a', 'session-b', 'session-c'],
+  })
+  await harness.act(async () => { root.unmount() })
+})

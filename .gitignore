@@ -1,0 +1,8 @@
+# Build outputs (anchored: `client/` must not swallow src/client/)
+/node_modules/
+/lib/
+/client/
+/tests/.build/
+
+*.log
+.DS_Store

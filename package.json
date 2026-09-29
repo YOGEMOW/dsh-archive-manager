@@ -1,0 +1,70 @@
+{
+  "name": "dsh-archive-manager",
+  "version": "0.1.0",
+  "description": "Archived-chats manager for DeepSeek Harness — a Codex-style page to search, filter, unarchive and permanently delete archived sessions. · 已归档会话管理器：搜索、筛选、取消归档、永久删除。",
+  "type": "module",
+  "main": "lib/index.js",
+  "license": "MIT",
+  "keywords": [
+    "deepseek",
+    "harness",
+    "dsh",
+    "dsh-plugin",
+    "archive",
+    "archived-chats"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
+    "build:host": "tsc -p tsconfig.json",
+    "build:client": "tsdown && node scripts/normalize-client-banner.mjs",
+    "build": "npm run build:host && npm run build:client",
+    "test": "npm run build:host && node --test tests/model.test.mjs tests/delete.test.mjs",
+    "test:render": "tsdown --config tsdown.render.config.ts && node --test tests/render.test.mjs",
+    "test:all": "npm test && npm run test:render"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-theme"
+      ],
+      "platform": "web"
+    }
+  },
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": "./client/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "client",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.4"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "~4.0.4",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.2.0-rc.2",
+    "@types/node": "^22.10.2",
+    "@types/react": "~18.3.1",
+    "@types/react-dom": "^18.3.7",
+    "jsdom": "^25.0.1",
+    "lightningcss": "^1.33.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tsdown": "^0.22.14",
+    "typescript": "~5.9.3"
+  }
+}
