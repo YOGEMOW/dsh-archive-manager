@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 36" width="36" height="36" role="img" aria-label="Archived chats">
+  <defs>
+    <linearGradient id="dsh-archive-lid" x1="4" y1="6" x2="32" y2="13.5" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8AA0FF"/>
+      <stop offset="1" stop-color="#4A63E7"/>
+    </linearGradient>
+    <linearGradient id="dsh-archive-body" x1="5.4" y1="15" x2="30.6" y2="32" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5B76F0"/>
+      <stop offset="1" stop-color="#3548C8"/>
+    </linearGradient>
+  </defs>
+  <rect x="3" y="6" width="30" height="7.5" rx="2.6" fill="url(#dsh-archive-lid)"/>
+  <path d="M5.4 15h25.2v12.6A4.4 4.4 0 0 1 26.2 32H9.8a4.4 4.4 0 0 1-4.4-4.4z" fill="url(#dsh-archive-body)"/>
+  <rect x="13.6" y="18.9" width="8.8" height="2.6" rx="1.3" fill="#fff" opacity=".92"/>
+</svg>

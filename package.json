@@ -5,6 +5,7 @@
   "type": "module",
   "main": "lib/index.js",
   "license": "MIT",
+  "icon": "./icon.svg",
   "keywords": [
     "deepseek",
     "harness",
@@ -20,7 +21,8 @@
     "build": "npm run build:host && npm run build:client",
     "test": "npm run build:host && node --test tests/model.test.mjs tests/delete.test.mjs",
     "test:render": "tsdown --config tsdown.render.config.ts && node --test tests/render.test.mjs",
-    "test:all": "npm test && npm run test:render"
+    "verify:metadata": "node scripts/verify-display-metadata.mjs",
+    "test:all": "npm test && npm run test:render && npm run verify:metadata"
   },
   "dsh": {
     "bundle": {
@@ -43,11 +45,14 @@
     },
     "./client": "./client/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"
   },
   "files": [
     "lib",
     "client",
+    "locale",
+    "icon.svg",
     "cordis.patch.yml",
     "README.md"
   ],

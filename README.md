@@ -101,6 +101,32 @@ dsh plugin --profile desktop add "E:\Git\repositoris\dsh-archive-manager"
 
 （`skipLiveSessions` 是旧键名，仍兼容，但语义已从"跳过已加载"改为"跳过在运行"。）
 
+## 在「插件」页显示得像官方插件
+
+设置 → 插件 里的「已安装」行，标题/描述/图标不是从 `dsh` 字段读的，而是 DSH 启动装配时的
+**包级展示元数据**（`dsh-app-boot` 的 `readPluginMeta`）：
+
+| 显示项 | 来源 | 缺省回退 |
+| --- | --- | --- |
+| 标题 | `locale/<lang>.json` 的 `meta.title` | `package.json` 的 `name` |
+| 描述 | `locale/<lang>.json` 的 `meta.description` | `package.json` 的 `description` |
+| 图标 | `package.json` 顶层 `icon` 字段，指向包内相对路径 | 通用拼图占位图 |
+
+两个硬性条件：
+
+1. **`locale/en.json` 必须存在**——目录扫描以英文资源为锚点，缺了它整个 `locale/` 都不会被读；
+   其余语言文件名必须是合法语言 id（`zh.json`、`zh-CN.json`…），与英文文件同目录。
+2. **locale 文件必须在 `exports` 里暴露**，否则 Node 解析器按包出口直接判定"不存在"：
+   `"./locale/*.json": "./locale/*.json"`。
+
+图标的约束（不满足会让该包的回退到占位图或报一条元数据诊断）：包内**相对**路径、
+SVG/PNG/JPEG/WebP、不超过 256 KiB、realpath 后仍在包目录内。DSH 会把图标读成
+`data:` URL 内联给页面，所以图标不需要额外路由。
+
+本仓库已按此配置：`icon.svg` + `locale/{en,zh}.json` + `exports` 里的 locale 通配。
+`npm run verify:metadata` 会**按 DSH 的解析方式**从 profile 目录实际解析一遍
+（`<pkg>/package.json`、`<pkg>/locale/en.json`、`<pkg>/locale/zh.json`），并复核上述所有图标规则。
+
 ## 目录结构
 
 ```
@@ -109,6 +135,9 @@ src/shared/model.ts              两端共享的纯逻辑（路径编码、筛�
 src/client/index.ts              客户端半：注册 settings.section、词典、会话列表刷新
 src/client/ArchiveManagerSection.tsx  页面本体
 src/client/ArchiveManager.module.css  页面样式（全部走 dsw 主题 token）
+icon.svg                         插件页图标
+locale/en.json locale/zh.json    插件页标题与描述
+scripts/verify-display-metadata.mjs  按 DSH 的方式校验展示元数据
 tests/model.test.mjs             纯逻辑单元测试
 tests/delete.test.mjs            真实文件系统上的删除/清理集成测试
 tests/render.test.mjs            jsdom 渲染测试
@@ -124,6 +153,7 @@ npm run typecheck   # 宿主 + 客户端两个 TS 工程
 npm run build       # tsc -> lib/ ；tsdown -> client/client.js
 npm test            # 纯逻辑 + 宿主删除集成测试（先构建宿主半）
 npm run test:render # jsdom 渲染测试（先打包测试壳）
+npm run verify:metadata  # 展示元数据（插件页标题/描述/图标）
 npm run test:all    # 全部
 ```
 
