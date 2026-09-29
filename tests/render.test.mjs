@@ -202,6 +202,34 @@ test('unarchive and permanent delete call the Host routes', async () => {
   await harness.act(async () => { root.unmount() })
 })
 
+test('the live variant reads the archive set through the injected selector hook', async () => {
+  setupDom()
+  const calls = stubFetch({
+    '/dsh-archive-manager/archived': () => ({ ok: true, sessions: ARCHIVED, total: ARCHIVED.length }),
+  })
+  const harness = await import('./.build/entry.mjs')
+  const t = (key) => harness.zh[key] ?? key
+  // The settings shell passes exactly this shape: a selector hook over the
+  // workspace snapshot. It is called unconditionally inside its own component.
+  const selections = []
+  const useWorkspaces = (selector) => {
+    selections.push(selector({ archivedSessionIds: ['session-a', 'session-b'] }))
+    return selector({ archivedSessionIds: ['session-a', 'session-b'] })
+  }
+  const container = document.getElementById('root')
+  const root = harness.createRoot(container)
+  await harness.act(async () => {
+    root.render(harness.React.createElement(harness.ArchiveManagerSection, { t, useWorkspaces }))
+  })
+
+  assert.ok(selections.length > 0, 'the selector must be read')
+  assert.equal(selections[0], 'session-a|session-b')
+  assert.match(container.textContent, /删除用户安装的Leinator市场/)
+  assert.equal(calls.filter((call) => call.path === '/dsh-archive-manager/archived').length >= 1, true)
+
+  await harness.act(async () => { root.unmount() })
+})
+
 test('delete-all targets every archived session', async () => {
   setupDom()
   const calls = stubFetch({

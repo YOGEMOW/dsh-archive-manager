@@ -50,6 +50,34 @@ export interface ArchiveManagerSectionProps {
   readonly useWorkspaces?: (selector: (state: unknown) => unknown) => unknown
 }
 
+/** Page props: owner props plus the archive-set revision derived by the wrapper. */
+interface ArchivePageProps extends ArchiveManagerSectionProps {
+  readonly revision: string
+}
+
+/**
+ * Section entry point. The shell passes a workspace selector hook as a standard
+ * prop; because a hook cannot be called conditionally, the live variant renders
+ * only when that prop exists, and the page itself then takes the derived
+ * revision as an ordinary value.
+ * @param props - localized copy, the locale service, and the workspace selector hook.
+ * @returns the archived-chats page.
+ */
+export function ArchiveManagerSection(props: ArchiveManagerSectionProps): React.ReactElement {
+  const useWorkspaces = props.useWorkspaces
+  if (useWorkspaces === undefined) return <ArchivePage {...props} revision="" />
+  return <LiveArchivePage {...props} useWorkspaces={useWorkspaces} />
+}
+
+/** Reads the archive set out of the workspace snapshot, so sidebar changes land here too. */
+function LiveArchivePage(props: ArchiveManagerSectionProps & { useWorkspaces: (selector: (state: unknown) => unknown) => unknown }): React.ReactElement {
+  const revision = String(props.useWorkspaces((state) => {
+    const ids = (state as { archivedSessionIds?: unknown } | null)?.archivedSessionIds
+    return Array.isArray(ids) ? ids.join('|') : ''
+  }) ?? '')
+  return <ArchivePage {...props} revision={revision} />
+}
+
 interface Notice {
   readonly tone: 'info' | 'error'
   readonly text: string
@@ -176,12 +204,12 @@ function SelectMenu(props: {
 }
 
 /**
- * The page itself. Rendered by the settings shell; also exported for tests.
- * @param props - localized copy, the locale service, and the workspace selector hook.
+ * The page itself: search, filters, grouping and the row actions.
+ * @param props - localized copy, the locale service and the archive-set revision.
  * @returns the archived-chats page.
  */
-export function ArchiveManagerSection(props: ArchiveManagerSectionProps): React.ReactElement {
-  const { t, locale, useWorkspaces } = props
+function ArchivePage(props: ArchivePageProps): React.ReactElement {
+  const { t, locale, revision } = props
   const [sessions, setSessions] = useState<readonly ArchivedSessionView[]>([])
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading')
   const [error, setError] = useState<string | null>(null)
@@ -197,13 +225,6 @@ export function ArchiveManagerSection(props: ArchiveManagerSectionProps): React.
   // changed (including changes made from the sidebar). Absent on Hosts that do
   // not project it into section props — the page then refreshes on its own
   // actions only.
-  const revision = useWorkspaces === undefined
-    ? ''
-    : String(useWorkspaces((state) => {
-      const ids = (state as { archivedSessionIds?: unknown } | null)?.archivedSessionIds
-      return Array.isArray(ids) ? ids.join('|') : ''
-    }) ?? '')
-
   const refresh = useCallback(async (): Promise<void> => {
     const controller = new AbortController()
     try {
