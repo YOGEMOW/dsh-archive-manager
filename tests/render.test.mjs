@@ -9,33 +9,43 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { JSDOM } from 'jsdom'
 
+/** One row as the stubbed Host route returns it. */
+function row(overrides) {
+  return {
+    sessionId: 'session-x',
+    title: 'T',
+    cwd: null,
+    workspaceId: null,
+    workspaceTitle: null,
+    createdAt: 1785778490000,
+    updatedAt: 1785778490000,
+    bytes: null,
+    parentSessionId: null,
+    persisted: true,
+    live: false,
+    running: false,
+    activity: [],
+    ...overrides,
+  }
+}
+
 /** Rows the stubbed Host route returns. */
 const ARCHIVED = [
-  {
+  row({
     sessionId: 'session-a',
     title: '删除用户安装的Leinator市场',
     cwd: 'E:\\Git\\repositoris',
     workspaceId: 'w1',
     workspaceTitle: 'repositoris',
-    createdAt: 1785778490000,
-    updatedAt: 1785778490000,
-    live: false,
     bytes: 2048,
-    parentSessionId: null,
-  },
-  {
+  }),
+  row({
     sessionId: 'session-b',
     title: null,
-    cwd: null,
-    workspaceId: null,
-    workspaceTitle: null,
     createdAt: 1785686490000,
     updatedAt: 1785686490000,
-    live: false,
-    bytes: null,
-    parentSessionId: null,
-  },
-  {
+  }),
+  row({
     sessionId: 'session-c',
     title: '切换ChatGPT界面为中文',
     cwd: 'E:\\DSH-workspace',
@@ -45,9 +55,31 @@ const ARCHIVED = [
     updatedAt: 1785590490000,
     live: true,
     bytes: 4096,
-    parentSessionId: null,
-  },
+  }),
+  row({
+    sessionId: 'session-d',
+    title: '已经删掉的会话',
+    cwd: 'E:\\Git\\repositoris',
+    createdAt: 1785504090000,
+    updatedAt: 1785504090000,
+    persisted: false,
+  }),
+  row({
+    sessionId: 'session-e',
+    title: '正在跑任务的会话',
+    cwd: 'E:\\Git\\repositoris',
+    workspaceId: 'w3',
+    workspaceTitle: 'repositoris',
+    createdAt: 1785417690000,
+    updatedAt: 1785417690000,
+    running: true,
+    activity: ['turn'],
+    bytes: 512,
+  }),
 ]
+
+/** Sessions the page treats as content (log on disk). */
+const CONTENT_IDS = ['session-a', 'session-b', 'session-c', 'session-e']
 
 /** Install a minimal DOM before anything imports react-dom. */
 function setupDom() {
@@ -108,11 +140,15 @@ test('the archived-chats page renders groups, rows and filters', async () => {
   const t = (key) => harness.zh[key] ?? key
   const container = document.getElementById('root')
   const root = harness.createRoot(container)
+  let refreshed = 0
   await harness.act(async () => {
-    root.render(harness.React.createElement(harness.ArchiveManagerSection, { t }))
+    root.render(harness.React.createElement(harness.ArchiveManagerSection, { t, sessionRefresh: () => { refreshed += 1 } }))
   })
 
   assert.equal(calls[0].path, '/dsh-archive-manager/archived')
+  // Opening the page re-lists the workspace baseline once, which is how rows
+  // whose logs vanished before removals were announced get reconciled.
+  assert.equal(refreshed, 1)
   const text = container.textContent
   assert.match(text, /已归档的聊天/)
   assert.match(text, /全部删除/)
@@ -122,14 +158,30 @@ test('the archived-chats page renders groups, rows and filters', async () => {
   assert.match(text, /repositoris/)
   assert.match(text, /DSH-workspace/)
   assert.match(text, /无项目/)
-  // Rows: one named title, the untitled fallback, and the live badge.
+  // Rows: one named title and the untitled fallback.
   assert.match(text, /删除用户安装的Leinator市场/)
   assert.match(text, /未命名会话/)
+  // A running turn and a merely loaded Session read differently.
+  assert.match(text, /正在跑任务的会话/)
   assert.match(text, /运行中/)
+  assert.match(text, /已加载/)
   // Group heading counts.
   assert.match(text, /1 个聊天/)
   // Byte footprint is rendered for measurable sessions.
   assert.match(text, /2\.0 KB/)
+
+  // A Session whose log is gone is NOT a normal row any more: it moves to the
+  // residue section, where its archive record can be released.
+  assert.match(text, /已删除的残留记录/)
+  assert.match(text, /已经删掉的会话/)
+  assert.doesNotMatch(text, /已经删掉的会话[\s\S]*取消归档/)
+
+  // The running Session's delete control is disabled; the idle one's is not.
+  const runningRow = [...container.querySelectorAll('li')].find((li) => (li.textContent ?? '').includes('正在跑任务的会话'))
+  assert.ok(runningRow, 'expected the running row')
+  assert.equal(runningRow.querySelector('button[aria-label^="删除 "]').disabled, true)
+  const idleRow = [...container.querySelectorAll('li')].find((li) => (li.textContent ?? '').includes('删除用户安装的Leinator市场'))
+  assert.equal(idleRow.querySelector('button[aria-label^="删除 "]').disabled, false)
 
   // The search box narrows the list without another Host round-trip.
   const input = container.querySelector('input[type="search"]')
@@ -254,7 +306,7 @@ test('delete-all targets every archived session', async () => {
   await harness.act(async () => {
     click(window, deleteAll)
   })
-  assert.match(document.body.textContent, /删除全部 3 个已归档会话？/)
+  assert.match(document.body.textContent, /删除全部 4 个已归档会话？/)
   const checkbox = document.body.querySelector('input[type="checkbox"]')
   assert.ok(checkbox, 'expected the acknowledgement checkbox')
   await harness.act(async () => {
@@ -265,9 +317,8 @@ test('delete-all targets every archived session', async () => {
   })
   const deleteCall = calls.find((call) => call.path === '/dsh-archive-manager/delete')
   assert.ok(deleteCall, 'expected a delete-all request after confirmation')
-  // Delete-all targets exactly the sessions the Host listed, in Host order.
-  assert.deepEqual(JSON.parse(deleteCall.body), {
-    sessionIds: ['session-a', 'session-b', 'session-c'],
-  })
+  // Delete-all targets every Session that still has content, in Host order —
+  // residue rows are not deletions, they are record releases.
+  assert.deepEqual(JSON.parse(deleteCall.body), { sessionIds: CONTENT_IDS })
   await harness.act(async () => { root.unmount() })
 })

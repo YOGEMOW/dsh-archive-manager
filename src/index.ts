@@ -39,10 +39,13 @@ export const ROUTE_PREFIX = '/dsh-archive-manager'
 /** Injectable configuration (all optional). */
 export interface Config {
   /**
-   * Refuse to delete a Session that is currently loaded in this Host process.
-   * Defaults to `true`: deleting a live Session's files would let the running
-   * writer recreate them, so the row is reported as skipped instead.
+   * Refuse to delete a Session whose Agent is running a turn. Defaults to
+   * `true`. Idle Sessions that merely sit in memory are deletable: the archive
+   * record then stays behind as the tombstone that keeps the workspace hiding
+   * them until the Host process releases them.
    */
+  skipRunningSessions?: boolean
+  /** @deprecated Use {@link Config.skipRunningSessions}; kept for existing configs. */
   skipLiveSessions?: boolean
   /** Maximum number of Sessions deleted per request. Defaults to 500. */
   maxDeleteBatch?: number
@@ -89,7 +92,6 @@ interface WorkspaceLike {
   readonly path: string
   readonly title: string
   readonly sessionIds: readonly string[]
-  detachSession(sessionId: string): Promise<void>
 }
 
 interface WorkspaceRegistryLike {
@@ -99,8 +101,34 @@ interface WorkspaceRegistryLike {
 }
 
 interface SessionsLike {
-  get(id: string): unknown
+  get(id: string): { readonly header: SessionHeaderLike } | undefined
 }
+
+interface AgentLike {
+  /** `'running'` while a turn is executing; anything else is loaded-but-idle. */
+  readonly status?: string
+}
+
+interface AgentsLike {
+  get(id: string): AgentLike | undefined
+}
+
+/** One table of a mounted storage domain. */
+interface StorageTableLike {
+  delete(key: string): void | Promise<void>
+}
+
+interface StorageDomainLike {
+  table(name: string): StorageTableLike | undefined
+}
+
+interface StorageDomainHubLike {
+  get(name: string): StorageDomainLike | undefined
+}
+
+/** The storage domain the persisted projection cache is mounted under. */
+const PROJECTION_CACHE_DOMAIN = 'session_projcache'
+const PROJECTION_CACHE_TABLE = 'sessions'
 
 interface LoggerLike {
   info?(message: string): void
@@ -118,6 +146,10 @@ interface HostContext {
   effect(callback: () => (() => void | Promise<void>) | void, label?: string): void
   inject(services: string[], callback: (ctx: HostContext) => void): void
   get(name: string): unknown
+  /** Cordis event emit; `api-session/*` names are forwarded to every client. */
+  emit?(name: string, ...args: unknown[]): void
+  /** Cordis waterfall dispatch, used for the Harness' own activity providers. */
+  waterfall?(name: string, ...args: unknown[]): Promise<unknown>
   logger?: LoggerLike
 }
 
@@ -317,8 +349,10 @@ function stringArray(value: unknown, field: string): string[] {
 
 interface DeleteOutcome {
   readonly sessionId: string
-  readonly status: 'deleted' | 'skipped-live' | 'missing' | 'failed'
+  readonly status: 'deleted' | 'skipped-running' | 'missing' | 'failed'
   readonly detail?: string
+  /** The Session is still loaded in the Host process after its log was removed. */
+  readonly residue?: boolean
 }
 
 interface HostServices {
@@ -326,12 +360,39 @@ interface HostServices {
   readonly query: SessionQueryLike | undefined
   readonly persistence: SessionPersistenceLike | undefined
   readonly sessions: SessionsLike | undefined
+  readonly agents: AgentsLike | undefined
+  readonly storageDomain?: StorageDomainHubLike
   readonly log: LoggerLike | undefined
+  /**
+   * Active work for one Session, in the Harness' own vocabulary
+   * (`turn` / `job` / `subagent` / `schedule`) — the answer the workspace
+   * registry itself uses to decide whether a Session may be archived.
+   */
+  readonly readActivity?: (sessionId: string) => Promise<readonly string[]>
+  /**
+   * Publish the forwarded `api-session/removed` event. `@deepseek-ai/dsh-api-remotes`
+   * forwards it to every connected browser, where the Session controller drops
+   * the row from its list snapshot — the only way a file-level deletion can
+   * reach an already-connected client without a reload.
+   */
+  readonly announceRemoved?: (sessionId: string) => void
+}
+
+/** Drop one Session's projection-cache row through its owning storage domain. */
+async function dropProjectionCacheRow(services: HostServices, sessionId: string): Promise<'domain' | 'file'> {
+  const table = services.storageDomain?.get(PROJECTION_CACHE_DOMAIN)?.table(PROJECTION_CACHE_TABLE)
+  if (table !== undefined) {
+    // The domain owns both the in-memory row and the file; a raw rm would leave
+    // the row behind and the next checkpoint would write the file back.
+    await table.delete(sessionId)
+    return 'domain'
+  }
+  return 'file'
 }
 
 /** Assemble the archived-session views for the management page. */
 export async function listArchivedSessions(services: HostServices, env: NodeJS.ProcessEnv = process.env): Promise<ArchivedSessionView[]> {
-  const { registry, query, persistence, sessions } = services
+  const { registry, query, persistence, sessions, agents, readActivity } = services
   if (registry === undefined) return []
   const ids = [...registry.archivedSessionIds]
   if (ids.length === 0) return []
@@ -342,7 +403,7 @@ export async function listArchivedSessions(services: HostServices, env: NodeJS.P
     for (const sessionId of workspace.sessionIds) bySession.set(sessionId, workspace)
   }
 
-  const headers = new Map<string, SessionHeaderLike>()
+  const persisted = new Map<string, SessionHeaderLike>()
   if (persistence !== undefined) {
     const snapshots = await Promise.all(
       ids.map(async (id) => {
@@ -355,7 +416,7 @@ export async function listArchivedSessions(services: HostServices, env: NodeJS.P
     )
     snapshots.forEach((snapshot, index) => {
       const id = ids[index]
-      if (snapshot !== undefined && id !== undefined) headers.set(id, snapshot.header)
+      if (snapshot !== undefined && id !== undefined) persisted.set(id, snapshot.header)
     })
   }
 
@@ -363,7 +424,11 @@ export async function listArchivedSessions(services: HostServices, env: NodeJS.P
 
   const views: ArchivedSessionView[] = []
   for (const id of ids) {
-    const header = headers.get(id)
+    const live = sessions?.get(id)
+    // A Session can be loaded in the Host process while its log is already
+    // gone; its in-memory header still describes it, so prefer the durable one
+    // and fall back to the live one rather than reporting an empty row.
+    const header = persisted.get(id) ?? live?.header
     const dir = await locateSessionDir(id, header, persistence, env)
     const [bytes, mtime] = dir === null
       ? [null, null]
@@ -375,11 +440,7 @@ export async function listArchivedSessions(services: HostServices, env: NodeJS.P
     const owner = workspace ?? fallbackWorkspace
     const title = titles.get(id)
     const createdAt = header?.createdAt ?? 0
-    const updatedAt = Math.max(
-      createdAt,
-      mtime ?? 0,
-      title?.updatedAt ?? 0,
-    )
+    const activity = readActivity === undefined ? [] : await readActivity(id)
     views.push({
       sessionId: id,
       title: title?.title ?? null,
@@ -388,9 +449,12 @@ export async function listArchivedSessions(services: HostServices, env: NodeJS.P
       workspaceTitle: owner?.title ?? null,
       createdAt,
       updatedAt: Math.round(Math.max(createdAt, mtime ?? 0, title?.updatedAt ?? 0)),
-      live: sessions?.get(id) !== undefined,
       bytes,
       parentSessionId: header?.parentSession ?? null,
+      persisted: persisted.has(id),
+      live: live !== undefined,
+      running: agents?.get(id)?.status === 'running' || activity.length > 0,
+      activity,
     })
   }
   return views
@@ -440,17 +504,26 @@ async function readTitles(
 /**
  * Permanently delete archived Sessions.
  *
- * Order matters: the Session leaves the archive set and its Workspace
- * accounting **before** its files go, so no surface can expose an id whose
- * content is already gone, and the SQLite search index simply reconciles the
- * vanished rows on its next pass (it has no separate deletion call).
+ * Three rules, each of which exists because of a failure mode this plugin hit
+ * in practice:
+ *
+ * 1. **Never unarchive while the Session is loaded.** DSH hides archived rows
+ *    from the workspace, so dropping the archive id is what made a deleted
+ *    Session "come back" in the sidebar. The id is released only once the
+ *    Session is gone from the Host process too — then nothing can resurrect it.
+ * 2. **Announce the removal.** The browser's Session list is a snapshot: a file
+ *    disappearing produces no frame, so the client keeps the row. Emitting the
+ *    forwarded `api-session/removed` event removes it live, in every window.
+ * 3. **Skip only what is actually running.** `ctx.sessions` holds *loaded*
+ *    Sessions, including idle ones; the running question is the Agent's
+ *    `status`, exactly as the Session controller answers it.
  */
 export async function deleteArchivedSessions(
   services: HostServices,
   ids: readonly string[],
-  options: { skipLive: boolean; maxBatch: number; env?: NodeJS.ProcessEnv } = { skipLive: true, maxBatch: 500 },
+  options: { skipRunning: boolean; maxBatch: number; env?: NodeJS.ProcessEnv } = { skipRunning: true, maxBatch: 500 },
 ): Promise<DeleteOutcome[]> {
-  const { registry, persistence, sessions, log } = services
+  const { registry, persistence, sessions, agents, log, readActivity, announceRemoved } = services
   const env = options.env ?? process.env
   if (registry === undefined) throw new Error('the workspace registry service is unavailable')
   const archived = new Set(registry.archivedSessionIds)
@@ -460,51 +533,106 @@ export async function deleteArchivedSessions(
   for (const id of batch) {
     try {
       if (!archived.has(id)) {
-        // Idempotent: a Session that already left the archive set is not an error.
+        // Idempotent: a Session that already left the archive set is not an
+        // error, and a client may still show a stale row for it.
+        announceRemoved?.(id)
         outcomes.push({ sessionId: id, status: 'missing', detail: 'not archived' })
         continue
       }
-      if (options.skipLive && sessions?.get(id) !== undefined) {
-        outcomes.push({ sessionId: id, status: 'skipped-live' })
+      // Busy means a running turn or any work the Harness' own activity
+      // providers report (job, subagent, schedule) — the same question
+      // `Workspace.archiveSession` asks before it admits a Session.
+      const activity = readActivity === undefined ? [] : await readActivity(id)
+      const runningTurn = agents?.get(id)?.status === 'running'
+      if (options.skipRunning && (runningTurn || activity.length > 0)) {
+        outcomes.push({
+          sessionId: id,
+          status: 'skipped-running',
+          detail: `active work: ${runningTurn ? 'turn' : ''}${runningTurn && activity.length > 0 ? '/' : ''}${activity.join('/')}`,
+        })
         continue
       }
 
       const snapshot = persistence === undefined
         ? undefined
         : await persistence.stat(id).catch(() => undefined)
-      const header = snapshot?.header
+      const header = snapshot?.header ?? sessions?.get(id)?.header
       const dir = await locateSessionDir(id, header, persistence, env)
 
-      // 1. Leave the archive set (also clears any stale id whose files are gone).
-      await registry.unarchiveSession(id)
-      archived.delete(id)
-
-      // 2. Drop Workspace accounting so the sidebar cannot render a ghost row.
-      for (const workspace of safeList(registry)) {
-        if (!workspace.sessionIds.includes(id)) continue
-        try {
-          await workspace.detachSession(id)
-        } catch (error) {
-          log?.warn?.(`[dsh-archive-manager] detachSession(${id}) failed: ${errorMessage(error)}`)
-        }
-      }
-
-      // 3. Remove the Session directory and its projection-cache row.
+      // Remove the Session directory and its projection-cache row. The
+      // in-memory search index needs no call: it reconciles the vanished rows
+      // against persistence on its next pass.
       const present = dir !== null && await pathExists(dir)
       if (present && dir !== null) await rm(dir, { recursive: true, force: true })
-      await rm(projectionCacheFile(id, env), { force: true })
+      const dropped = await dropProjectionCacheRow(services, id)
+      if (dropped === 'file') await rm(projectionCacheFile(id, env), { force: true })
       if (present && dir !== null && await pathExists(dir)) {
         throw new Error(`the session directory survived removal: ${dir}`)
       }
 
-      outcomes.push({ sessionId: id, status: present ? 'deleted' : 'missing' })
-      log?.info?.(`[dsh-archive-manager] deleted archived session ${id}`)
+      const residue = sessions?.get(id) !== undefined
+      if (!residue) {
+        await registry.unarchiveSession(id)
+        archived.delete(id)
+      }
+      announceRemoved?.(id)
+
+      outcomes.push({
+        sessionId: id,
+        status: present ? 'deleted' : 'missing',
+        ...(residue
+          ? { residue: true, detail: 'the session is still loaded in this Host process; its archive record is kept so the workspace keeps hiding it' }
+          : {}),
+      })
+      log?.info?.(`[dsh-archive-manager] deleted archived session ${id}${residue ? ' (live residue)' : ''}`)
     } catch (error) {
       outcomes.push({ sessionId: id, status: 'failed', detail: errorMessage(error) })
       log?.warn?.(`[dsh-archive-manager] deleting ${id} failed: ${errorMessage(error)}`)
     }
   }
   return outcomes
+}
+
+/**
+ * Release the archive records of Sessions whose logs are already gone.
+ *
+ * `deleteArchivedSessions` keeps such a record only while the Session is still
+ * loaded (the record is what keeps the workspace hiding it). Once the Host
+ * process has released it, the record is pure residue and can be dropped —
+ * but only then, or the row would reappear.
+ */
+export async function purgeArchiveRecords(
+  services: HostServices,
+  ids: readonly string[],
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<Array<{ sessionId: string; status: 'purged' | 'kept' | 'failed'; detail?: string }>> {
+  const { registry, persistence, sessions, log, announceRemoved } = services
+  if (registry === undefined) throw new Error('the workspace registry service is unavailable')
+  const out: Array<{ sessionId: string; status: 'purged' | 'kept' | 'failed'; detail?: string }> = []
+  for (const id of ids) {
+    try {
+      if (!registry.archivedSessionIds.includes(id)) {
+        out.push({ sessionId: id, status: 'kept', detail: 'not archived' })
+        continue
+      }
+      if (sessions?.get(id) !== undefined) {
+        out.push({ sessionId: id, status: 'kept', detail: 'the session is still loaded; restart DSH first' })
+        continue
+      }
+      if (persistence !== undefined && await persistence.stat(id).catch(() => undefined) !== undefined) {
+        out.push({ sessionId: id, status: 'kept', detail: 'the session log still exists; delete it instead' })
+        continue
+      }
+      await registry.unarchiveSession(id)
+      announceRemoved?.(id)
+      out.push({ sessionId: id, status: 'purged' })
+    } catch (error) {
+      out.push({ sessionId: id, status: 'failed', detail: errorMessage(error) })
+      log?.warn?.(`[dsh-archive-manager] purging the record of ${id} failed: ${errorMessage(error)}`)
+    }
+  }
+  void env
+  return out
 }
 
 function errorMessage(error: unknown): string {
@@ -521,7 +649,7 @@ function errorMessage(error: unknown): string {
  * @param config - Optional loader configuration.
  */
 export function apply(ctx: HostContext, config?: Config): void {
-  const skipLive = config?.skipLiveSessions ?? true
+  const skipRunning = config?.skipRunningSessions ?? config?.skipLiveSessions ?? true
   const maxBatch = config?.maxDeleteBatch ?? 500
 
   ctx.inject(['webServer'], (hostCtx) => {
@@ -532,7 +660,23 @@ export function apply(ctx: HostContext, config?: Config): void {
       query: hostCtx.get('sessionQuery') as SessionQueryLike | undefined,
       persistence: hostCtx.get('sessionPersistence') as SessionPersistenceLike | undefined,
       sessions: hostCtx.get('sessions') as SessionsLike | undefined,
+      agents: hostCtx.get('agents') as AgentsLike | undefined,
+      storageDomain: hostCtx.get('storageDomain') as StorageDomainHubLike | undefined,
       log: hostCtx.logger,
+      readActivity: async (sessionId) => {
+        // Best effort: a composition without activity providers simply reports none.
+        try {
+          const result = await hostCtx.waterfall?.('workspace/session-activity', { sessionId }, () => Promise.resolve([]))
+          if (!Array.isArray(result)) return []
+          return result.map((entry) => {
+            const kind = (entry as { kind?: unknown } | null)?.kind
+            return typeof kind === 'string' ? kind : 'unknown'
+          })
+        } catch {
+          return []
+        }
+      },
+      announceRemoved: (sessionId) => hostCtx.emit?.('api-session/removed', sessionId),
     })
 
     const dispose = webServer.register({
@@ -548,7 +692,7 @@ export function apply(ctx: HostContext, config?: Config): void {
             sendJson(response, 200, { ok: true, sessions: views, total: views.length })
             return
           }
-          if (method === 'POST' && (route === '/delete' || route === '/delete-all')) {
+          if (method === 'POST' && (route === '/delete' || route === '/delete-all' || route === '/purge-records')) {
             if (!sameOrigin(request)) {
               sendJson(response, 403, { ok: false, error: 'cross-origin request refused' })
               return
@@ -561,13 +705,22 @@ export function apply(ctx: HostContext, config?: Config): void {
               sendJson(response, 200, { ok: true, outcomes: [], deleted: 0 })
               return
             }
-            const outcomes = await deleteArchivedSessions(services(), requested, { skipLive, maxBatch })
-            const remaining = services().registry?.archivedSessionIds?.length ?? 0
+            if (route === '/purge-records') {
+              const purged = await purgeArchiveRecords(services(), requested)
+              sendJson(response, 200, {
+                ok: true,
+                outcomes: purged,
+                purged: purged.filter((outcome) => outcome.status === 'purged').length,
+                remaining: services().registry?.archivedSessionIds?.length ?? 0,
+              })
+              return
+            }
+            const outcomes = await deleteArchivedSessions(services(), requested, { skipRunning, maxBatch })
             sendJson(response, 200, {
               ok: true,
               outcomes,
               deleted: outcomes.filter((outcome) => outcome.status === 'deleted').length,
-              remaining,
+              remaining: services().registry?.archivedSessionIds?.length ?? 0,
             })
             return
           }

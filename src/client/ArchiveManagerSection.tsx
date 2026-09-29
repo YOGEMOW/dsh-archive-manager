@@ -10,6 +10,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  IconArchiveOffOutlineRegular,
   IconArchiveOutlineRegular,
   IconChevronDownOutlineRegular,
   IconLoadingOutlineRegular,
@@ -48,6 +49,12 @@ export interface ArchiveManagerSectionProps {
   readonly locale?: LocaleLike
   /** Standard prop of `settings.section`: a selector hook over the workspace snapshot. */
   readonly useWorkspaces?: (selector: (state: unknown) => unknown) => unknown
+  /**
+   * The client Session controller's baseline refresh (`ClientSessions.refresh`).
+   * Re-listing is the only way to drop rows whose logs vanished before this
+   * plugin learned to announce removals; absent when the service is not mounted.
+   */
+  readonly sessionRefresh?: () => unknown
 }
 
 /** Page props: owner props plus the archive-set revision derived by the wrapper. */
@@ -89,8 +96,14 @@ interface ArchivedPayload {
 }
 
 interface DeletePayload {
-  readonly outcomes: readonly { readonly sessionId: string; readonly status: string; readonly detail?: string }[]
+  readonly outcomes: readonly { readonly sessionId: string; readonly status: string; readonly detail?: string; readonly residue?: boolean }[]
   readonly deleted: number
+  readonly remaining: number
+}
+
+interface PurgePayload {
+  readonly outcomes: readonly { readonly sessionId: string; readonly status: string; readonly detail?: string }[]
+  readonly purged: number
   readonly remaining: number
 }
 
@@ -209,7 +222,7 @@ function SelectMenu(props: {
  * @returns the archived-chats page.
  */
 function ArchivePage(props: ArchivePageProps): React.ReactElement {
-  const { t, locale, revision } = props
+  const { t, locale, revision, sessionRefresh } = props
   const [sessions, setSessions] = useState<readonly ArchivedSessionView[]>([])
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading')
   const [error, setError] = useState<string | null>(null)
@@ -220,6 +233,7 @@ function ArchivePage(props: ArchivePageProps): React.ReactElement {
   const [busy, setBusy] = useState(false)
   const [pending, setPending] = useState<{ ids: readonly string[]; all: boolean } | null>(null)
   const [acknowledged, setAcknowledged] = useState(false)
+  const [purging, setPurging] = useState(false)
 
   // The workspace snapshot is the cheapest live signal that the archive set
   // changed (including changes made from the sidebar). Absent on Hosts that do
@@ -243,6 +257,17 @@ function ArchivePage(props: ArchivePageProps): React.ReactElement {
     void refresh()
   }, [refresh, revision])
 
+  // Opening this page re-lists the workspace's Session baseline once. A log
+  // deleted before this plugin announced removals leaves a row the browser has
+  // no frame to drop; a re-list reconciles it (the Host's list re-scans disk).
+  useEffect(() => {
+    try {
+      void sessionRefresh?.()
+    } catch {
+      /* an unavailable controller simply leaves the sidebar as it was */
+    }
+  }, [sessionRefresh])
+
   const localeTag = resolveLocaleTag(locale)
   const timeFormat = useMemo(
     () => new Intl.DateTimeFormat(localeTag, {
@@ -255,14 +280,19 @@ function ArchivePage(props: ArchivePageProps): React.ReactElement {
     [localeTag],
   )
 
+  // Sessions whose log still exists are the page's real content; anything else
+  // is residue the archive set (or the Host process) is still holding.
+  const content = useMemo(() => sessions.filter((session) => session.persisted), [sessions])
+  const residue = useMemo(() => sessions.filter((session) => !session.persisted), [sessions])
+
   const selected = useMemo(
-    () => selectArchivedSessions(sessions, { search: query, scope, project }),
-    [sessions, query, scope, project],
+    () => selectArchivedSessions(content, { search: query, scope, project }),
+    [content, query, scope, project],
   )
 
   const groups = useMemo(() => groupArchivedSessions(selected, t('group.none')), [selected, t])
 
-  const projects = useMemo(() => projectOptions(sessions), [sessions])
+  const projects = useMemo(() => projectOptions(content), [content])
 
   const scopeOptions = useMemo(() => [
     { key: 'all', title: t('scope.all') },
@@ -287,10 +317,12 @@ function ArchivePage(props: ArchivePageProps): React.ReactElement {
     setNotice(null)
     try {
       const payload = (await postJson('/delete', { sessionIds: ids })) as DeletePayload
-      const skipped = payload.outcomes.filter((outcome) => outcome.status === 'skipped-live').length
+      const skipped = payload.outcomes.filter((outcome) => outcome.status === 'skipped-running').length
       const failed = payload.outcomes.filter((outcome) => outcome.status === 'failed').length
+      const residueCount = payload.outcomes.filter((outcome) => outcome.residue === true).length
       const parts = [fill(t('toast.deleted'), { n: payload.deleted })]
-      if (skipped > 0) parts.push(fill(t('toast.skipped'), { n: skipped }))
+      if (skipped > 0) parts.push(fill(t('toast.skippedRunning'), { n: skipped }))
+      if (residueCount > 0) parts.push(fill(t('toast.residue'), { n: residueCount }))
       if (failed > 0) parts.push(fill(t('toast.failed'), { n: failed }))
       setNotice({ tone: failed > 0 ? 'error' : 'info', text: parts.join(' · ') })
       await refresh()
@@ -298,6 +330,24 @@ function ArchivePage(props: ArchivePageProps): React.ReactElement {
       setNotice({ tone: 'error', text: fill(t('toast.error'), { message: cause instanceof Error ? cause.message : String(cause) }) })
     } finally {
       setBusy(false)
+    }
+  }, [refresh, t])
+
+  const runPurge = useCallback(async (ids: readonly string[]): Promise<void> => {
+    if (ids.length === 0) return
+    setPurging(true)
+    setNotice(null)
+    try {
+      const payload = (await postJson('/purge-records', { sessionIds: ids })) as PurgePayload
+      const kept = payload.outcomes.filter((outcome) => outcome.status === 'kept').length
+      const parts = [fill(t('toast.purged'), { n: payload.purged })]
+      if (kept > 0) parts.push(fill(t('toast.kept'), { n: kept }))
+      setNotice({ tone: 'info', text: parts.join(' · ') })
+      await refresh()
+    } catch (cause) {
+      setNotice({ tone: 'error', text: fill(t('toast.error'), { message: cause instanceof Error ? cause.message : String(cause) }) })
+    } finally {
+      setPurging(false)
     }
   }, [refresh, t])
 
@@ -325,10 +375,10 @@ function ArchivePage(props: ArchivePageProps): React.ReactElement {
         <button
           type="button"
           className={css.deleteAll}
-          disabled={busy || sessions.length === 0}
+          disabled={busy || content.length === 0}
           onClick={() => {
             setAcknowledged(false)
-            setPending({ ids: sessions.map((session) => session.sessionId), all: true })
+            setPending({ ids: content.map((session) => session.sessionId), all: true })
           }}
         >
           <IconTrashOutlineRegular size={14} />
@@ -391,7 +441,7 @@ function ArchivePage(props: ArchivePageProps): React.ReactElement {
           </div>
         ) : null}
 
-        {phase === 'ready' && groups.length === 0 ? (
+        {phase === 'ready' && groups.length === 0 && residue.length === 0 ? (
           <div className={css.state}>
             <span className={css.stateIcon}><IconArchiveOutlineRegular size={24} /></span>
             <div className={css.stateTitle}>{filtering ? t('empty.filtered') : t('empty.none')}</div>
@@ -426,7 +476,11 @@ function ArchivePage(props: ArchivePageProps): React.ReactElement {
                         <span className={css.rowTitle} title={session.title ?? undefined}>
                           {sessionDisplayTitle(session, t('row.untitled'))}
                         </span>
-                        {session.live ? <span className={css.badge}>{t('row.live')}</span> : null}
+                        {session.running
+                          ? <span className={css.badge}>{t('row.running')}</span>
+                          : session.live
+                            ? <span className={css.badgeLoaded}>{t('row.loaded')}</span>
+                            : null}
                       </div>
                       <div className={css.rowTime}>
                         {session.updatedAt > 0 ? timeFormat.format(new Date(session.updatedAt)) : '—'}
@@ -438,9 +492,9 @@ function ArchivePage(props: ArchivePageProps): React.ReactElement {
                       <button
                         type="button"
                         className={css.iconButton}
-                        title={t('row.delete')}
+                        title={session.running ? t('row.deleteRunningHint') : t('row.delete')}
                         aria-label={`${t('row.delete')} ${sessionDisplayTitle(session, t('row.untitled'))}`}
-                        disabled={busy}
+                        disabled={busy || session.running}
                         onClick={() => {
                           setAcknowledged(false)
                           setPending({ ids: [session.sessionId], all: false })
@@ -464,6 +518,45 @@ function ArchivePage(props: ArchivePageProps): React.ReactElement {
             </section>
           ))
           : null}
+
+        {phase === 'ready' && residue.length > 0 ? (
+          <section className={css.group} key="__residue__">
+            <div className={css.groupHead}>
+              <IconArchiveOffOutlineRegular size={14} />
+              <span className={css.groupTitle}>{t('residue.title')}</span>
+              <span className={css.groupCount}>{fill(t('group.count'), { n: residue.length })}</span>
+            </div>
+            <div className={css.residueHint}>{t('residue.hint')}</div>
+            <ul className={css.list}>
+              {residue.map((session) => (
+                <li className={css.row} key={session.sessionId}>
+                  <div className={css.rowMain}>
+                    <div className={css.rowTitleLine}>
+                      <span className={css.rowTitle} title={session.title ?? undefined}>
+                        {sessionDisplayTitle(session, t('row.untitled'))}
+                      </span>
+                      {session.live ? <span className={css.badgeLoaded}>{t('row.loaded')}</span> : null}
+                    </div>
+                    <div className={css.rowTime}>
+                      {session.live ? t('residue.needsRestart') : t('residue.releasable')}
+                    </div>
+                  </div>
+                  <div className={css.rowActions}>
+                    <button
+                      type="button"
+                      className={css.secondaryButton}
+                      disabled={busy || purging || session.live}
+                      title={session.live ? t('residue.needsRestart') : t('residue.release')}
+                      onClick={() => { void runPurge([session.sessionId]) }}
+                    >
+                      {t('residue.release')}
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
       </div>
 
       <RiskConfirmation

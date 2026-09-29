@@ -23,6 +23,7 @@ function icon(name: string) {
 }
 
 export const IconArchiveOutlineRegular = icon('archive')
+export const IconArchiveOffOutlineRegular = icon('archive-off')
 export const IconChevronDownOutlineRegular = icon('chevron-down')
 export const IconLoadingOutlineRegular = icon('loading')
 export const IconSearchOutlineRegular = icon('search')

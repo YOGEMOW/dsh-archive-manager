@@ -10,6 +10,7 @@ import {
   encodeSegment,
   formatBytes,
   groupArchivedSessions,
+  isResidue,
   projectKey,
   projectOptions,
   selectArchivedSessions,
@@ -26,9 +27,12 @@ function session(overrides) {
     workspaceTitle: null,
     createdAt: 1000,
     updatedAt: 2000,
-    live: false,
     bytes: null,
     parentSessionId: null,
+    persisted: true,
+    live: false,
+    running: false,
+    activity: [],
     ...overrides,
   }
 }
@@ -108,4 +112,11 @@ test('formatBytes keeps sizes short and readable', () => {
   assert.equal(formatBytes(2048), '2.0 KB')
   assert.equal(formatBytes(5 * 1024 * 1024), '5.0 MB')
   assert.equal(formatBytes(-1), '—')
+})
+
+test('isResidue marks rows whose log is gone from disk', () => {
+  assert.equal(isResidue(session({ persisted: true, live: false })), false)
+  assert.equal(isResidue(session({ persisted: false, live: false })), true)
+  // A Session deleted while loaded is residue too: its log is gone.
+  assert.equal(isResidue(session({ persisted: false, live: true })), true)
 })

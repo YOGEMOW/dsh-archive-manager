@@ -19,12 +19,26 @@ export interface ArchivedSessionView {
   readonly createdAt: number
   /** Last known activity time, epoch milliseconds. */
   readonly updatedAt: number
-  /** The Session is loaded in the Host process right now. */
-  readonly live: boolean
   /** On-disk footprint of the Session directory in bytes, when measurable. */
   readonly bytes: number | null
   /** Parent Session id, for subagent-origin Sessions. */
   readonly parentSessionId: string | null
+  /** The Session's log still exists on disk (the Host could read its header). */
+  readonly persisted: boolean
+  /** The Session is loaded in the Host process right now. */
+  readonly live: boolean
+  /** An Agent is running a turn for this Session right now. */
+  readonly running: boolean
+  /** Active work kinds reported by the Harness (`turn`/`job`/`subagent`/`schedule`). */
+  readonly activity: readonly string[]
+}
+
+/**
+ * A row whose log is gone from disk but that is still held by the archive set
+ * (a tombstone that keeps the sidebar hiding it) and/or by the Host process.
+ */
+export function isResidue(session: ArchivedSessionView): boolean {
+  return !session.persisted
 }
 
 /** A group of archived Sessions shown under one project heading. */

@@ -45,7 +45,7 @@ dsh plugin --profile desktop add "E:\Git\repositoris\dsh-archive-manager"
 - id: dsh-archive-manager
   name: "dsh-archive-manager"
   config:
-    skipLiveSessions: true
+    skipRunningSessions: true   # 只跳过真正在跑的会话
     maxDeleteBatch: 500
 ```
 
@@ -60,16 +60,34 @@ dsh plugin --profile desktop add "E:\Git\repositoris\dsh-archive-manager"
 
 ## 删除语义（重要）
 
-「删除」是**不可恢复的物理删除**，按以下顺序执行（顺序有意如此）：
+「删除」是**不可恢复的物理删除**。每一步都对应一个真实踩过的坑：
 
-1. 拒绝在运行时删除：会话仍在宿主内存中（`ctx.sessions.get(id)`）时默认跳过，因为正在写入的会话会把文件重新写回来；
-2. 从注册表归档集合中移除该 id（`workspaceRegistry.unarchiveSession`）——幂等，且顺带清掉「文件早已不存在」的悬空 id；
-3. 从所属 Workspace 的记账中摘除（`Workspace.detachSession`），避免侧边栏留下幽灵行；
-4. 删除会话目录 `<DSH_HOME>/sessions/<projectKey(cwd)>/<encoded-id>/`（经 `sessionPersistence.locate()` 定位，缺失时按 DSH 的目录布局回退计算，最后才用扫描兜底）；
-5. 删除投影缓存行 `<DSH_HOME>/storages/session_projcache/sessions/<id>.json`；
-6. SQLite 搜索索引无需处理：它在下一次对账时自行丢弃消失的行。
+1. **只跳过真正在跑的会话**。判定用 `agents.get(id).status === 'running'` **加上**
+   `workspace/session-activity` waterfall（`turn`/`job`/`subagent`/`schedule`，与
+   `Workspace.archiveSession` 的准入检查同源）。仅仅"已加载在内存里但空闲"的会话
+   **可以删除**——这正是之前被误判成"运行中"而删不掉的那种。
+2. **只有确认会话已不在宿主进程中时才释放归档记录**。DSH 正是靠归档集合把会话从工作区
+   隐藏起来：以前先 `unarchiveSession` 再删文件，等于当场把行放回侧边栏，这就是"删除后
+   又出现在工作区"的直接原因。会话仍驻留内存时，归档记录**保留**为墓碑，工作区继续隐藏它。
+3. **删除后广播 `api-session/removed`**。浏览器的会话列表是按连接世代拉取一次的**快照**，
+   文件消失不会产生任何帧；`@deepseek-ai/dsh-api-remotes` 会把该事件转发给每个已连接的
+   客户端，客户端把该行从列表快照里移除——这是唯一能让"已经打开着的窗口"立刻更新的通道。
+4. 删除会话目录 `<DSH_HOME>/sessions/<projectKey(cwd)>/<encoded-id>/`（经
+   `sessionPersistence.locate()` 定位，缺失时按 DSH 的目录布局回退计算，最后才扫描兜底）。
+5. 删除投影缓存行时**走存储域**（`storageDomain.get('session_projcache').table('sessions').delete(id)`），
+   而不是裸 `rm` 文件：裸删只会删掉文件，内存里的行还在，下一次 checkpoint 会把文件写回来；
+   存储域未挂载时才回退到直接删文件。
+6. SQLite 搜索索引无需处理（本部署把它挂成 `:memory:` + `openAt: 'never'`，且从不喂给侧边栏）。
 
 删除**不会**触碰全局附件对象存储（`~/.dsh/attachments`）：那是内容寻址的共享对象，其他会话可能仍在引用同一份对象。
+
+### 残留记录（墓碑）
+
+删除某个"仍驻留内存"的会话后，归档集合里会留下一条没有内容的记录——它是工作区继续隐藏
+该行的依据。页面底部会把它们单列成「已删除的残留记录」：
+
+- 会话仍驻留内存时，按钮禁用并提示**重启 DSH 后再清理**；
+- 重启后（会话不再驻留内存），可以点「清理记录」把它从归档集合里摘掉，归档列表彻底干净。
 
 ### 配置项（`cordis.patch.yml` 的 `config`）
 
@@ -77,19 +95,23 @@ dsh plugin --profile desktop add "E:\Git\repositoris\dsh-archive-manager"
 - id: dsh-archive-manager
   name: 'dsh-archive-manager'
   config:
-    skipLiveSessions: true   # 默认 true：跳过仍在运行的会话
-    maxDeleteBatch: 500      # 单次请求最多删除多少个会话
+    skipRunningSessions: true   # 默认 true：跳过 turn/job/subagent/schedule 仍在活动的会话
+    maxDeleteBatch: 500         # 单次请求最多删除多少个会话
 ```
+
+（`skipLiveSessions` 是旧键名，仍兼容，但语义已从"跳过已加载"改为"跳过在运行"。）
 
 ## 目录结构
 
 ```
-src/index.ts                     宿主半：HTTP 路由 + 删除编排
+src/index.ts                     宿主半：HTTP 路由 + 删除/清理编排
 src/shared/model.ts              两端共享的纯逻辑（路径编码、筛选、分组、格式化）
-src/client/index.ts              客户端半：注册 settings.section 与词典
+src/client/index.ts              客户端半：注册 settings.section、词典、会话列表刷新
 src/client/ArchiveManagerSection.tsx  页面本体
 src/client/ArchiveManager.module.css  页面样式（全部走 dsw 主题 token）
 tests/model.test.mjs             纯逻辑单元测试
+tests/delete.test.mjs            真实文件系统上的删除/清理集成测试
+tests/render.test.mjs            jsdom 渲染测试
 ```
 
 宿主半**不 import 任何 `@deepseek-ai/*` 运行时包**：第三方插件的依赖由 profile 解析，
@@ -109,9 +131,9 @@ npm run test:all    # 全部
 
 | 套件 | 覆盖 |
 | --- | --- |
-| `tests/model.test.mjs` | 路径编码（对齐 DSH 的 `projectKey`/`encodeSegment`）、搜索/范围/项目筛选、分组、排序、格式化 |
-| `tests/delete.test.mjs` | **真实文件系统**上的删除编排：临时 `DSH_HOME` 造会话目录与投影缓存 → 断言目录/缓存被删、归档集合被清理、Workspace 记账被摘除；运行中会话被跳过；悬空 id 只清理集合；`locate()` 缺失时回退到目录布局 |
-| `tests/render.test.mjs` | jsdom 中挂载真实页面组件：分组/行/徽标/字节渲染、搜索过滤、取消归档请求、删除确认（未勾选确认前不得发请求）、全部删除的 id 集合 |
+| `tests/model.test.mjs` | 路径编码（对齐 DSH 的 `projectKey`/`encodeSegment`）、搜索/范围/项目筛选、分组、排序、格式化、残留判定 |
+| `tests/delete.test.mjs` | **真实文件系统**上的删除/清理编排：临时 `DSH_HOME` 造会话目录与投影缓存 → 断言目录与缓存被删、`api-session/removed` 被广播、归档记录在"会话未驻留内存"时被释放而"仍驻留"时保留为墓碑、运行中/有 job 的会话被跳过、经存储域删缓存、`locate()` 缺失时回退目录布局、清理只放行无日志且未驻留的记录 |
+| `tests/render.test.mjs` | jsdom 中挂载真实页面组件：分组/行/徽标（运行中 vs 已加载）/字节渲染、残留区与主列表分离、运行中行删除按钮禁用、搜索过滤、取消归档请求、删除确认（未勾选确认前不得发请求）、全部删除只针对有内容的行、挂载时调用会话列表刷新 |
 
 渲染测试把 `@deepseek-ai/dsh-client-ui-primitives` 别名到 `tests/render/primitives-stub.tsx`：
 真实 primitives 只能在浏览器的加载器模块表里运行（它的 ESM 入口 import 十几个 CSS 模块和
@@ -133,4 +155,7 @@ window.__ModuleLoader__.load({ id: "dsh-archive-manager", factory: (require) => 
 
 - 归档集合本身不保存归档时间，因此列表按「最近活动时间」排序（取标题事件时间、日志文件 mtime、创建时间的最大值）。
 - 没有「恢复已删除会话」的逆向操作：DSH 的删除是文件系统级的。
-- 运行中的会话会被跳过，界面会用一条状态提示告知跳过的数量。
+- 会话仍在运行（turn/job/subagent/schedule）时删除会被跳过，界面用一条状态提示告知跳过的数量。
+- 删除"仍驻留内存"的会话会留下一条墓碑记录（工作区继续隐藏它），重启 DSH 后可在页面底部清理。
+- DSH 在本部署的搜索索引是 `:memory:` 且 `openAt: 'never'`，删除后无需维护它；若将来换成持久索引，
+  它会在下一次对账时自行丢弃消失的行。

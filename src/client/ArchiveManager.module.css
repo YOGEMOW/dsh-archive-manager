@@ -260,6 +260,24 @@
   line-height: 17px;
 }
 
+/* A Session that is loaded in the Host process but idle: not running. */
+.badgeLoaded {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--dsw-alias-label-secondary) 14%, transparent);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.residueHint {
+  padding: 0 2px 8px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 17px;
+}
+
 .rowActions {
   display: flex;
   align-items: center;
