@@ -9,7 +9,7 @@
  * `<style data-plugin>` tag at factory execution.
  */
 import { readFile } from 'node:fs/promises'
-import { basename, dirname, resolve as resolvePath } from 'node:path'
+import { basename, dirname, isAbsolute, relative, resolve as resolvePath, sep } from 'node:path'
 import { defineConfig } from 'tsdown'
 import { transform } from 'lightningcss'
 
@@ -21,6 +21,31 @@ const CLIENT_EXTERNALS = ['react', 'react/jsx-runtime', 'react-dom', '@deepseek-
 /** Virtual-id wrapper keeping module CSS away from tsdown's own css pipeline. */
 const CSS_VIRTUAL_PREFIX = '\0dsh-archive-css:'
 const CSS_VIRTUAL_SUFFIX = '.mjs'
+
+/**
+ * A machine-independent name for one stylesheet. lightningcss folds this string
+ * into the `[hash]` of every generated class, so an absolute path made the
+ * committed bundle differ from the one CI built from the same source.
+ * @param fileId - absolute path of the stylesheet being compiled.
+ * @returns the checkout-relative path, or the bare basename when it escapes.
+ */
+function stableName(fileId: string): string {
+  const local = relative(process.cwd(), fileId)
+  if (local === '' || local.startsWith(`..${sep}`) || isAbsolute(local)) return basename(fileId)
+  return local.split(sep).join('/')
+}
+
+/**
+ * lightningcss returns its class map in an unstable key order, which alone made
+ * two builds of identical source differ; sorting restores reproducibility.
+ * @param classMap - generated local-name to hashed-name map.
+ * @returns the same map with sorted keys.
+ */
+function sortedClassMap(classMap: Record<string, string>): Record<string, string> {
+  const sorted: Record<string, string> = {}
+  for (const key of Object.keys(classMap).sort()) sorted[key] = classMap[key] as string
+  return sorted
+}
 
 export default defineConfig({
   entry: { client: 'src/client/index.ts' },
@@ -51,7 +76,7 @@ export default defineConfig({
       this.addWatchFile(fileId)
       const source = await readFile(fileId)
       const { code, exports: cssExports } = transform({
-        filename: fileId,
+        filename: stableName(fileId),
         code: source,
         cssModules: { pattern: '[hash]_[local]' },
         minify: true,
@@ -69,7 +94,7 @@ export default defineConfig({
         '  tag.textContent = css;',
         '  document.head.appendChild(tag);',
         '}',
-        `export default ${JSON.stringify(classMap)};`,
+        `export default ${JSON.stringify(sortedClassMap(classMap))};`,
       ].join('\n')
     },
   }],

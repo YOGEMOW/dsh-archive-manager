@@ -1,0 +1,10 @@
+# Keep the working tree identical on every platform: the committed `lib/` and
+# `client/` artifacts are byte-compared against a fresh build in CI, and the
+# toolchain emits LF.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.ico binary

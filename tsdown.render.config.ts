@@ -7,7 +7,7 @@
  * modules compile to class maps, exactly as the shipped client build does.
  */
 import { readFile } from 'node:fs/promises'
-import { dirname, resolve as resolvePath } from 'node:path'
+import { basename, dirname, isAbsolute, relative, resolve as resolvePath, sep } from 'node:path'
 import { defineConfig } from 'tsdown'
 import { transform } from 'lightningcss'
 
@@ -22,6 +22,20 @@ const NODE_EXTERNALS = [
 
 const CSS_VIRTUAL_PREFIX = '\0dsh-archive-test-css:'
 const CSS_VIRTUAL_SUFFIX = '.mjs'
+
+/** Machine-independent stylesheet name; see the same helper in tsdown.config.ts. */
+function stableName(fileId: string): string {
+  const local = relative(process.cwd(), fileId)
+  if (local === '' || local.startsWith(`..${sep}`) || isAbsolute(local)) return basename(fileId)
+  return local.split(sep).join('/')
+}
+
+/** lightningcss returns its class map in an unstable key order; sort it. */
+function sortedClassMap(classMap: Record<string, string>): Record<string, string> {
+  const sorted: Record<string, string> = {}
+  for (const key of Object.keys(classMap).sort()) sorted[key] = classMap[key] as string
+  return sorted
+}
 
 export default defineConfig({
   entry: { entry: 'tests/render/entry.tsx' },
@@ -51,14 +65,14 @@ export default defineConfig({
       this.addWatchFile(fileId)
       const source = await readFile(fileId)
       const { exports: cssExports } = transform({
-        filename: fileId,
+        filename: stableName(fileId),
         code: source,
         cssModules: { pattern: '[hash]_[local]' },
         minify: true,
       })
       const classMap: Record<string, string> = {}
       for (const [local, exp] of Object.entries(cssExports ?? {})) classMap[local] = exp.name
-      return `export default ${JSON.stringify(classMap)};`
+      return `export default ${JSON.stringify(sortedClassMap(classMap))};`
     },
   }],
   outputOptions: {
