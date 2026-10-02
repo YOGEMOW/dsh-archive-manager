@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      # Host model + deletion integration tests, the jsdom render harness, and
+      # the package display-metadata checks. No browser or DSH install needed.
+      - run: npm run test:all
+      # The tracked artifacts must match the sources they were built from.
+      - name: Verify committed artifacts are current
+        run: git diff --exit-code -- lib client

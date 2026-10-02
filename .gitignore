@@ -1,8 +1,9 @@
-# Build outputs (anchored: `client/` must not swallow src/client/)
+# Dependencies and test scratch output are never published.
 /node_modules/
-/lib/
-/client/
 /tests/.build/
 
+# `lib/` and `client/` ARE tracked on purpose: installing this plugin straight
+# from git (`dsh plugin add <repo>`) then needs no build step. Rebuild them
+# before committing a source change — `npm run build`.
 *.log
 .DS_Store
