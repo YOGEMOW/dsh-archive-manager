@@ -1,5 +1,8 @@
 # dsh-archive-manager
 
+[![ci](https://github.com/YOGEMOW/dsh-archive-manager/actions/workflows/ci.yml/badge.svg)](https://github.com/YOGEMOW/dsh-archive-manager/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 DeepSeek Harness（DSH）的**已归档会话管理器**：一个类似 Codex「Archived chats」的设置页，用来集中查看、搜索、筛选、取消归档，以及**永久删除**已归档的会话。
 
 Archived-chats manager for DeepSeek Harness — a Codex-style page to search, filter, unarchive and permanently delete archived sessions.
@@ -28,6 +31,18 @@ DSH 的归档本身只是一个**注册表级的会话 id 集合**（`workspace`
 
 ## 安装
 
+### 从 GitHub 安装（推荐）
+
+`lib/` 与 `client/` 的构建产物已随仓库提交，所以从 git 安装**无需先构建**：
+
+```powershell
+dsh plugin --profile desktop add github:YOGEMOW/dsh-archive-manager
+```
+
+安装后打开 **设置 → 已归档的聊天**。
+
+### 从本地目录安装
+
 ```powershell
 # 1. 构建
 npm install
@@ -37,7 +52,7 @@ npm run build
 dsh plugin --profile desktop add "E:\Git\repositoris\dsh-archive-manager"
 ```
 
-安装后打开 **设置 → 已归档的聊天**。本机已按此路径装好（profile 依赖为
+本机已按此路径装好（profile 依赖为
 `dsh-archive-manager: link:E:/Git/repositoris/dsh-archive-manager`），并在
 `~/.dsh/profiles/desktop/cordis.patch.yml` 写入了默认配置：
 
