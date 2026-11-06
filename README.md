@@ -29,6 +29,23 @@ DSH 的归档本身只是一个**注册表级的会话 id 集合**（`workspace`
 > 设置外壳本来就为 id 为 `archived-sessions` 的 section 预留了归档图标
 > （`dsh-client-ui-settings-general` 的 `navIcon()`），本插件正是注册到那个 id 上。
 
+## 兼容性
+
+当前版本 **0.1.1** 已在 **DeepSeek Harness 0.2.2-rc.1 / cordis 4.1.0** 上核对与实测
+（此前在 0.2.0-rc.2 上开发）。逐项核对过的契约：
+
+| 依赖面 | 0.2.2-rc.1 现状 |
+| --- | --- |
+| 客户端基础包（`dsh-client-ui-primitives` / `-ui-slots` / `-client-store` / `-ui-dockkit`） | **不再作为独立 app 包存在**，改为打进 web shell 并由模块表种子暴露；插件 bundle 里的 `require("@deepseek-ai/dsh-client-ui-primitives")` 等写法**仍然有效** |
+| 设置页挂载点 | `settings.section`（list/root）不变；新增可选的 `settings.section.icon`（按 section id 派发，缺省回退内置 `navIcon()`，本插件使用回退的归档图标） |
+| 宿主服务 | `workspaceRegistry.archivedSessionIds` / `unarchiveSession`、`sessionPersistence.stat/locate`、`sessionQuery.readTitleSnapshots`、`sessions`、`agents.get().status`、`storageDomain.get().table().delete`、`webServer.register({kind,path,handler})` 全部仍存在且形状不变 |
+| 转发事件 | `api-session/removed` 仍在 `dsh-api-remotes` 的白名单里（删除后实时移除侧边栏行依赖它） |
+| 数据布局 | 投影缓存域仍为 `session_projcache`/`sessions`；会话目录仍是 `<root>/--<projectKey>--/<encoded-id>/`；`workspace` 存储域仍为 v2 |
+| 展示元数据 | `locale/*.json` 的 `meta.title`/`meta.description` + `package.json` 顶层 `icon` 不变 |
+| 插件类型 | `@deepseek-ai/dsh-client-ui-primitives@0.2.2-rc.1` + `@deepseek-ai/cordis@4.1.0` 下 `npm run typecheck` 通过，客户端产物字节不变 |
+
+`peerDependencies` 里的 cordis 放宽为 `>=4.0.4 <5`，以便同时兼容 4.0.x 与 4.1.x 的宿主。
+
 ## 安装
 
 ### 从 GitHub 安装（推荐）

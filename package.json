@@ -1,6 +1,6 @@
 {
   "name": "dsh-archive-manager",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Archived-chats manager for DeepSeek Harness — a Codex-style page to search, filter, unarchive and permanently delete archived sessions. · 已归档会话管理器：搜索、筛选、取消归档、永久删除。",
   "type": "module",
   "main": "lib/index.js",
@@ -57,11 +57,11 @@
     "README.md"
   ],
   "peerDependencies": {
-    "@deepseek-ai/cordis": "~4.0.4"
+    "@deepseek-ai/cordis": ">=4.0.4 <5"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "~4.0.4",
-    "@deepseek-ai/dsh-client-ui-primitives": "0.2.0-rc.2",
+    "@deepseek-ai/cordis": "~4.1.0",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.2.2-rc.1",
     "@types/node": "^22.10.2",
     "@types/react": "~18.3.1",
     "@types/react-dom": "^18.3.7",
